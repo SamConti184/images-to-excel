@@ -5,7 +5,7 @@ Reads Italian book cover images from a folder, extracts metadata using GPT visio
 and saves results to an Excel file.
 
 Usage:
-    book_covers_to_excel.exe <folder_path> <openai_api_key>
+    book_covers_to_excel.exe <folder_path> <openai_api_key> [model]
     book_covers_to_excel.exe                          (will prompt for inputs)
 """
 
@@ -32,7 +32,7 @@ except ImportError:
     sys.exit(1)
 
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp'}
-MODEL = "gpt-5.5"
+DEFAULT_MODEL = "gpt-5.5"
 
 SYSTEM_PROMPT = """Sei un esperto di catalogazione libraria italiana.
 Analizza la copertina del libro nell'immagine ed estrai le seguenti informazioni.
@@ -43,7 +43,9 @@ Il JSON deve avere esattamente queste chiavi:
   "titolo": "titolo completo del libro, o stringa vuota se non visibile",
   "luogo_di_stampa": "città di stampa/pubblicazione, o stringa vuota se non visibile",
   "editore": "nome dell'editore, o stringa vuota se non visibile",
-  "anno": "anno di pubblicazione come stringa, o stringa vuota se non visibile"
+  "anno": "anno di pubblicazione come stringa, o stringa vuota se non visibile",
+  "note": "qualsiasi altra informazione visibile sulla copertina che non rientra nei campi precedenti: collana, numero di edizione, traduttore, illustratore, ISBN, sottotitolo, ecc. Stringa vuota se non c'è nulla di rilevante.",
+  "testo_completo": "trascrizione integrale di tutto il testo leggibile sulla copertina, esattamente come appare, inclusi titolo, autore, editore e qualsiasi altra scritta visibile"
 }
 Se un'informazione non è visibile sulla copertina, lascia il campo come stringa vuota.
 Non inventare informazioni non presenti nell'immagine."""
@@ -62,14 +64,14 @@ def image_to_base64(image_path):
     return b64, media_type
 
 
-def call_openai_vision(client, image_path, max_retries=5):
+def call_openai_vision(client, image_path, model, max_retries=5):
     """Call OpenAI vision API with exponential backoff on rate limit errors."""
     b64, media_type = image_to_base64(image_path)
 
     for attempt in range(max_retries):
         try:
             response = client.responses.create(
-                model=MODEL,
+                model=model,
                 input=[
                     {
                         "role": "system",
@@ -129,8 +131,8 @@ def save_to_excel(results, output_path):
     thin = Side(style='thin', color='CCCCCC')
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    headers = ['#', 'File', 'Autore', 'Titolo', 'Luogo di Stampa', 'Editore', 'Anno', 'Note']
-    col_widths = [5, 30, 25, 40, 20, 25, 8, 20]
+    headers = ['#', 'File', 'Autore', 'Titolo', 'Luogo di Stampa', 'Editore', 'Anno', 'Note', 'Testo Completo']
+    col_widths = [5, 30, 25, 40, 20, 25, 8, 20, 50]
 
     for col_idx, (header, width) in enumerate(zip(headers, col_widths), 1):
         cell = ws.cell(row=1, column=col_idx, value=header)
@@ -157,6 +159,7 @@ def save_to_excel(results, output_path):
             entry.get('editore', ''),
             entry.get('anno', ''),
             entry.get('note', ''),
+            entry.get('testo_completo', ''),
         ]
         for col_idx, value in enumerate(values, 1):
             cell = ws.cell(row=row_idx, column=col_idx, value=value)
@@ -196,6 +199,13 @@ def main():
     if not api_key.startswith('sk-'):
         print("\nWARNING: API key doesn't look right (should start with 'sk-'). Continuing anyway...")
 
+    if len(sys.argv) >= 4:
+        model = sys.argv[3].strip()
+    else:
+        model = input(f"\nEnter the GPT model to use (default: {DEFAULT_MODEL}, just press Enter):\n> ").strip()
+        if not model:
+            model = DEFAULT_MODEL
+
     client = OpenAI(api_key=api_key)
 
     image_files = get_image_files(folder)
@@ -222,27 +232,33 @@ def main():
         entry = {'filename': filename}
 
         try:
-            data = call_openai_vision(client, image_path)
+            data = call_openai_vision(client, image_path, model)
             entry.update({
                 'autore': data.get('autore', ''),
                 'titolo': data.get('titolo', ''),
                 'luogo_di_stampa': data.get('luogo_di_stampa', ''),
                 'editore': data.get('editore', ''),
                 'anno': data.get('anno', ''),
-                'note': ''
+                'note': data.get('note', ''),
+                'testo_completo': data.get('testo_completo', '')
             })
             print(f"  ✓  {data.get('titolo', '(no title)')[:50]}")
         except Exception as e:
             entry.update({
                 'autore': '', 'titolo': '', 'luogo_di_stampa': '',
-                'editore': '', 'anno': '', 'note': f'ERROR: {str(e)[:80]}'
+                'editore': '', 'anno': '', 'note': f'ERROR: {str(e)[:80]}', 'testo_completo': ''
             })
             print(f"  ✗  ERROR: {str(e)[:60]}")
             errors += 1
 
         results.append(entry)
 
-    output_path = os.path.join(folder, "libri_catalogo.xlsx")
+    base_name = "libri_catalogo.xlsx"
+    output_path = os.path.join(folder, base_name)
+    if os.path.exists(output_path):
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = os.path.join(folder, f"libri_catalogo_{timestamp}.xlsx")
     print(f"\nSaving results to Excel...")
     save_to_excel(results, output_path)
 
