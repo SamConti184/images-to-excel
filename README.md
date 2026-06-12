@@ -1,3 +1,1 @@
 # images-to-excel
-
-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
